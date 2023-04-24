@@ -173,6 +173,10 @@
                 </relocation>
 
                 <relocation>
+                  <pattern>com.google.</pattern>
+                  <shadedPattern>${flink.bundle.shade.prefix}com.google.</shadedPattern>
+                </relocation>
+                <relocation>
                   <pattern>javax.servlet.</pattern>
                   <shadedPattern>${flink.bundle.shade.prefix}javax.servlet.</shadedPattern>
                 </relocation>
