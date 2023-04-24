@@ -98,6 +98,64 @@ class TestMORDataSource extends HoodieClientTestBase with SparkDatasetMixin {
     )
 
   @ParameterizedTest
+  @CsvSource(Array("AVRO, AVRO, avro"))
+  def testInc(readType: HoodieRecordType, writeType: HoodieRecordType, logType: String) {
+    var (_, readOpts) = getWriterReaderOpts(readType)
+    var (writeOpts, _) = getWriterReaderOpts(writeType)
+    readOpts = readOpts ++ Map(HoodieStorageConfig.LOGFILE_DATA_BLOCK_FORMAT.key -> logType)
+    writeOpts = writeOpts ++ Map(HoodieStorageConfig.LOGFILE_DATA_BLOCK_FORMAT.key -> logType)
+
+    // First Operation:
+    // Producing parquet files to three default partitions.
+    // SNAPSHOT view on MOR table with parquet files only.
+    val records1 = recordsToStrings(dataGen.generateInserts("001", 100)).asScala
+    val inputDF1 = spark.read.json(spark.sparkContext.parallelize(records1, 2))
+    inputDF1.write.format("org.apache.hudi")
+      .options(writeOpts)
+      .option("hoodie.compact.inline", "false") // else fails due to compaction & deltacommit instant times being same
+      .option(DataSourceWriteOptions.OPERATION.key, DataSourceWriteOptions.INSERT_OPERATION_OPT_VAL)
+      .option(DataSourceWriteOptions.TABLE_TYPE.key, DataSourceWriteOptions.MOR_TABLE_TYPE_OPT_VAL)
+      .mode(SaveMode.Overwrite)
+      .save(basePath)
+    assertTrue(HoodieDataSourceHelpers.hasNewCommits(fs, basePath, "000"))
+    val hudiSnapshotDF1 = spark.read.format("org.apache.hudi")
+      .options(readOpts)
+      .option(DataSourceReadOptions.QUERY_TYPE.key, DataSourceReadOptions.QUERY_TYPE_SNAPSHOT_OPT_VAL)
+      .load(basePath + "/*/*/*/*")
+    assertEquals(100, hudiSnapshotDF1.count()) // still 100, since we only updated
+    val commit1Time = hudiSnapshotDF1.select("_hoodie_commit_time").head().get(0).toString
+
+    // 操作步骤二：删除原有的50条数据，然后新增50条数据
+    // 测试delta数据的incremental读取 ，应该是100条数据，其中50条都是删除，50条是新增
+    val partialDelete = dataGen.generateUniqueDeleteRecords("003", 50)
+    val partialUpdate = dataGen.generateInserts("003", 50)
+    partialDelete.addAll(partialUpdate)
+    val totalData = recordsToStrings(partialDelete).asScala
+    val inputDF0: Dataset[Row] = spark.read.json(spark.sparkContext.parallelize(totalData, 2))
+    inputDF0.write.format("org.apache.hudi")
+      .options(writeOpts)
+      .option(HoodieIndexConfig.INDEX_TYPE.key, IndexType.INMEMORY.toString)
+      .mode(SaveMode.Append)
+      .save(basePath)
+    val hudiSnapshotDF0 = spark.read.format("org.apache.hudi")
+      .options(readOpts)
+      .option(DataSourceReadOptions.QUERY_TYPE.key, DataSourceReadOptions.QUERY_TYPE_SNAPSHOT_OPT_VAL)
+      .load(basePath + "/*/*/*/*")
+    assertEquals(100, hudiSnapshotDF0.count()) // still 100, since we only updated
+    val commit0Time = hudiSnapshotDF0.sort("_hoodie_commit_time").select("_hoodie_commit_time").distinct().collect().lastOption.get.getAs[String]("_hoodie_commit_time")
+    val hudiIncDF0 = spark.read.format("org.apache.hudi")
+      .options(readOpts)
+      .option(DataSourceReadOptions.QUERY_TYPE.key, DataSourceReadOptions.QUERY_TYPE_INCREMENTAL_OPT_VAL)
+      .option(DataSourceReadOptions.BEGIN_INSTANTTIME.key, commit1Time)
+      .option(DataSourceReadOptions.END_INSTANTTIME.key, commit0Time)
+      .load(basePath)
+    // 打印delta的commit的数据，判断是否能获取所有delete数据和insert数据
+    hudiIncDF0.foreach(r => System.out.println(r))
+    assertEquals(50, hudiIncDF0.filter(r => r.getAs("_hoodie_is_deleted").equals(true)).count())
+    assertEquals(50, hudiIncDF0.filter(r => r.getAs("_hoodie_is_deleted").equals(false)).count())
+  }
+
+  @ParameterizedTest
   @CsvSource(Array("AVRO, AVRO, avro", "AVRO, SPARK, parquet", "SPARK, AVRO, parquet", "SPARK, SPARK, parquet"))
   def testCount(readType: HoodieRecordType, writeType: HoodieRecordType, logType: String) {
     var (_, readOpts) = getWriterReaderOpts(readType)
